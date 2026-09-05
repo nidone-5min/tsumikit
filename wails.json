@@ -1,0 +1,13 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "tsumikit",
+  "outputfilename": "tsumikit",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "nidone-5min",
+    "email": "320070323+nidone-5min@users.noreply.github.com"
+  }
+}
