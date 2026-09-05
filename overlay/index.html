@@ -59,7 +59,10 @@
     <script>
       const status = document.getElementById('status');
       const message = document.getElementById('message');
-      const socket = new WebSocket(`ws://${window.location.host}/ws`);
+      const capability = window.location.pathname.slice('/overlay/'.length);
+      const socket = new WebSocket(
+        `ws://${window.location.host}/ws/${encodeURIComponent(capability)}`,
+      );
 
       socket.addEventListener('open', () => {
         status.textContent = 'OBS接続準備完了';

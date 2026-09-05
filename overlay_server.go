@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -16,11 +20,14 @@ import (
 )
 
 const (
-	overlayPath           = "/overlay"
-	websocketPath         = "/ws"
+	overlayPathPrefix     = "/overlay/"
+	websocketPathPrefix   = "/ws/"
 	serverShutdownTimeout = 3 * time.Second
 	clientWriteTimeout    = 2 * time.Second
 	clientReadLimit       = 64 * 1024
+	clientPingInterval    = 15 * time.Second
+	clientLeaseTimeout    = 45 * time.Second
+	capabilityBytes       = 32
 )
 
 var (
@@ -50,6 +57,8 @@ type TestEvent struct {
 type overlayClient struct {
 	connection *websocket.Conn
 	writeMu    sync.Mutex
+	done       chan struct{}
+	closeOnce  sync.Once
 }
 
 func (c *overlayClient) write(payload []byte) error {
@@ -63,16 +72,28 @@ func (c *overlayClient) write(payload []byte) error {
 }
 
 func (c *overlayClient) close() {
+	c.closeOnce.Do(func() {
+		close(c.done)
+		c.writeMu.Lock()
+		defer c.writeMu.Unlock()
+
+		_ = c.connection.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "server stopped"),
+			time.Now().Add(clientWriteTimeout),
+		)
+		_ = c.connection.Close()
+	})
+}
+
+func (c *overlayClient) ping() error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-
-	_ = c.connection.SetWriteDeadline(time.Now().Add(clientWriteTimeout))
-	_ = c.connection.WriteControl(
-		websocket.CloseMessage,
-		websocket.FormatCloseMessage(websocket.CloseNormalClosure, "server stopped"),
+	return c.connection.WriteControl(
+		websocket.PingMessage,
+		nil,
 		time.Now().Add(clientWriteTimeout),
 	)
-	_ = c.connection.Close()
 }
 
 // OverlayServer owns the loopback HTTP server and connected Browser Sources.
@@ -82,12 +103,19 @@ type OverlayServer struct {
 	listener   net.Listener
 	clients    map[*overlayClient]struct{}
 	port       int
+	capability string
 	lastError  string
+	pingEvery  time.Duration
+	leaseFor   time.Duration
 }
 
 // NewOverlayServer constructs an idle overlay server.
 func NewOverlayServer() *OverlayServer {
-	return &OverlayServer{clients: make(map[*overlayClient]struct{})}
+	return &OverlayServer{
+		clients:   make(map[*overlayClient]struct{}),
+		pingEvery: clientPingInterval,
+		leaseFor:  clientLeaseTimeout,
+	}
 }
 
 // Start starts the server on IPv4 loopback only.
@@ -98,6 +126,12 @@ func (s *OverlayServer) Start(port int) error {
 	if s.httpServer != nil {
 		return errors.New("オーバーレイサーバーはすでに起動しています")
 	}
+	capability, err := newCapability()
+	if err != nil {
+		friendlyErr := fmt.Errorf("安全なOBS用URLを作成できませんでした: %w", err)
+		s.lastError = friendlyErr.Error()
+		return friendlyErr
+	}
 
 	listener, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
@@ -107,20 +141,26 @@ func (s *OverlayServer) Start(port int) error {
 	}
 
 	actualPort := listener.Addr().(*net.TCPAddr).Port
+	authority := fmt.Sprintf("127.0.0.1:%d", actualPort)
 	mux := http.NewServeMux()
 	server := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       30 * time.Second,
 	}
-	mux.HandleFunc(overlayPath, s.serveOverlay)
-	mux.HandleFunc(websocketPath, func(w http.ResponseWriter, r *http.Request) {
-		s.serveWebSocket(server, w, r)
+	mux.HandleFunc(overlayPathPrefix, func(w http.ResponseWriter, r *http.Request) {
+		s.serveOverlay(authority, capability, w, r)
 	})
+	mux.HandleFunc(strings.TrimSuffix(overlayPathPrefix, "/"), http.NotFound)
+	mux.HandleFunc(websocketPathPrefix, func(w http.ResponseWriter, r *http.Request) {
+		s.serveWebSocket(server, authority, capability, w, r)
+	})
+	mux.HandleFunc(strings.TrimSuffix(websocketPathPrefix, "/"), http.NotFound)
 
 	s.listener = listener
 	s.httpServer = server
 	s.port = actualPort
+	s.capability = capability
 	s.lastError = ""
 	go s.serve(server, listener)
 	return nil
@@ -139,6 +179,7 @@ func (s *OverlayServer) serve(server *http.Server, listener net.Listener) {
 		s.httpServer = nil
 		s.listener = nil
 		s.port = 0
+		s.capability = ""
 		clients = make([]*overlayClient, 0, len(s.clients))
 		for client := range s.clients {
 			clients = append(clients, client)
@@ -163,6 +204,7 @@ func (s *OverlayServer) Stop(parent context.Context) error {
 	s.httpServer = nil
 	s.listener = nil
 	s.port = 0
+	s.capability = ""
 	s.clients = make(map[*overlayClient]struct{})
 	if listener != nil {
 		_ = listener.Close()
@@ -198,7 +240,7 @@ func (s *OverlayServer) Status() OverlayStatus {
 		Error:       s.lastError,
 	}
 	if status.Running {
-		status.URL = fmt.Sprintf("http://127.0.0.1:%d%s", status.Port, overlayPath)
+		status.URL = fmt.Sprintf("http://127.0.0.1:%d%s%s", status.Port, overlayPathPrefix, s.capability)
 	}
 	return status
 }
@@ -248,8 +290,12 @@ func (s *OverlayServer) SendTestEvent(message string) error {
 	return nil
 }
 
-func (s *OverlayServer) serveOverlay(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != overlayPath {
+func (s *OverlayServer) serveOverlay(authority, capability string, w http.ResponseWriter, r *http.Request) {
+	if !validAuthority(r, authority) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if !validCapabilityPath(r.URL.Path, overlayPathPrefix, capability) {
 		http.NotFound(w, r)
 		return
 	}
@@ -266,6 +312,7 @@ func (s *OverlayServer) serveOverlay(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'")
 	_, _ = w.Write(content)
@@ -275,9 +322,17 @@ var websocketUpgrader = websocket.Upgrader{
 	EnableCompression: false,
 }
 
-func (s *OverlayServer) serveWebSocket(owner *http.Server, w http.ResponseWriter, r *http.Request) {
+func (s *OverlayServer) serveWebSocket(owner *http.Server, authority, capability string, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !validAuthority(r, authority) || !validOrigin(r.Header.Get("Origin"), authority) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if !validCapabilityPath(r.URL.Path, websocketPathPrefix, capability) {
+		http.NotFound(w, r)
 		return
 	}
 
@@ -285,22 +340,75 @@ func (s *OverlayServer) serveWebSocket(owner *http.Server, w http.ResponseWriter
 	if err != nil {
 		return
 	}
-	client := &overlayClient{connection: connection}
+	client := &overlayClient{connection: connection, done: make(chan struct{})}
 	connection.SetReadLimit(clientReadLimit)
+	if err := connection.SetReadDeadline(time.Now().Add(s.leaseFor)); err != nil {
+		_ = connection.Close()
+		return
+	}
+	connection.SetPongHandler(func(string) error {
+		return connection.SetReadDeadline(time.Now().Add(s.leaseFor))
+	})
 	if !s.addClient(owner, client) {
 		client.close()
 		return
 	}
 	defer func() {
 		s.removeClient(client)
-		_ = connection.Close()
+		client.close()
 	}()
+	go s.keepAlive(client)
 
 	for {
 		if _, _, err := connection.ReadMessage(); err != nil {
 			return
 		}
 	}
+}
+
+func (s *OverlayServer) keepAlive(client *overlayClient) {
+	ticker := time.NewTicker(s.pingEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := client.ping(); err != nil {
+				_ = client.connection.Close()
+				return
+			}
+		case <-client.done:
+			return
+		}
+	}
+}
+
+func newCapability() (string, error) {
+	random := make([]byte, capabilityBytes)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(random), nil
+}
+
+func validAuthority(r *http.Request, authority string) bool {
+	return r.Host == authority
+}
+
+func validCapabilityPath(path, prefix, capability string) bool {
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	provided := strings.TrimPrefix(path, prefix)
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(capability)) == 1
+}
+
+func validOrigin(origin, authority string) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return parsed.Scheme == "http" && parsed.Host == authority && parsed.User == nil &&
+		parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == ""
 }
 
 func (s *OverlayServer) addClient(owner *http.Server, client *overlayClient) bool {
