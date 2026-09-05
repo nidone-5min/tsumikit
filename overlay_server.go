@@ -178,7 +178,9 @@ func (s *OverlayServer) Stop(parent context.Context) error {
 	}
 	ctx, cancel := context.WithTimeout(parent, serverShutdownTimeout)
 	defer cancel()
-	if err := server.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := server.Shutdown(ctx); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) &&
+		!errors.Is(err, net.ErrClosed) {
 		return fmt.Errorf("オーバーレイサーバーを停止できませんでした: %w", err)
 	}
 	return nil
