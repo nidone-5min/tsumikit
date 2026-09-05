@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>tsumikit overlay</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: system-ui, sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        background: transparent;
+        color: #fff;
+      }
+      main {
+        width: min(760px, calc(100vw - 64px));
+        padding: 32px;
+        border: 1px solid rgb(255 255 255 / 18%);
+        border-radius: 24px;
+        background: rgb(16 18 23 / 88%);
+        box-shadow: 0 24px 80px rgb(0 0 0 / 32%);
+        text-align: center;
+      }
+      #status {
+        margin: 0 0 12px;
+        color: #aab2c0;
+        font-size: 16px;
+      }
+      #message {
+        margin: 0;
+        font-size: clamp(36px, 7vw, 72px);
+        overflow-wrap: anywhere;
+      }
+      #message.received {
+        animation: pulse 600ms ease-out;
+      }
+      @keyframes pulse {
+        50% {
+          transform: scale(1.04);
+          color: #80e7aa;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p id="status">接続しています…</p>
+      <p id="message">tsumikit</p>
+    </main>
+    <script>
+      const status = document.getElementById('status');
+      const message = document.getElementById('message');
+      const socket = new WebSocket(`ws://${window.location.host}/ws`);
+
+      socket.addEventListener('open', () => {
+        status.textContent = 'OBS接続準備完了';
+      });
+      socket.addEventListener('message', (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type !== 'test' || typeof payload.message !== 'string') return;
+          message.classList.remove('received');
+          void message.offsetWidth;
+          message.textContent = payload.message;
+          message.classList.add('received');
+          status.textContent = 'テストイベントを受信しました';
+        } catch {
+          status.textContent = '不正なイベントを受信しました';
+        }
+      });
+      socket.addEventListener('close', () => {
+        status.textContent = '接続が切断されました';
+      });
+      socket.addEventListener('error', () => {
+        status.textContent = '接続エラー';
+      });
+    </script>
+  </body>
+</html>
