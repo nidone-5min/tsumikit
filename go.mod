@@ -3,6 +3,7 @@ module tsumikit
 go 1.25.0
 
 require (
+	fyne.io/systray v1.12.2
 	github.com/gorilla/websocket v1.5.3
 	github.com/wailsapp/wails/v2 v2.15.0
 )

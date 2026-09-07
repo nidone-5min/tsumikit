@@ -2,7 +2,7 @@
 
 YouTube Live / Twitch のイベントを受け取り、OBS Browser Source で演出を実行するデスクトップアプリです。
 
-現在は Phase 0 の技術検証段階です。PR-004 ではOBS Browser Source用の最小Overlay SDKと、CEF上のセキュリティ／メディア互換性を確認するPoCを追加しています。
+現在は Phase 0 の技術検証段階です。PR-005 ではWindowsのシステムトレイ／macOSのメニューバー常駐と、シングルインスタンス動作を確認するPoCを追加しています。
 
 ## 採用バージョン
 
@@ -75,6 +75,14 @@ HTTPリクエストのHostとWebSocket接続のOriginは、表示されたルー
 HTML応答にはCSP、`sandbox`、Permissions-Policyと追加のセキュリティヘッダーを付与します。OBS上の診断表示で、透過背景、画像、音声／動画の自動再生、外部fetch、外部WebSocket、worker、popup、外部navigation、WebRTCの拒否結果を確認できます。
 
 SDKとオーバーレイHTMLはこのPoC専用です。ZIPパッケージ向けの公開SDK契約と追加APIは後続PRで実装します。
+
+## Trayとアプリ終了
+
+ウィンドウの閉じるボタンを押すと、アプリは終了せずWindowsではシステムトレイ、macOSではメニューバーへ常駐します。「tsumikitを表示」でウィンドウを再表示し、「終了」でアプリを終了できます。OBS Browser Sourceが接続中の場合は、接続を切断する前に確認ダイアログを表示します。
+
+同じ利用者セッションでtsumikitをもう一度起動すると、新しいプロセスは終了し、既存のウィンドウが前面に表示されます。2回目の起動に渡されたコマンドライン引数と作業ディレクトリは処理しません。
+
+TrayはWails v2の外部イベントループへ`fyne.io/systray`を統合するPhase 0実装です。Trayの初期化に失敗した環境では、ウィンドウを閉じると通常どおりアプリを終了し、画面を再表示できない状態で常駐しません。
 
 ## 品質チェック
 
