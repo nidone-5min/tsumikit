@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +17,59 @@ type fakeYouTubeAPI struct {
 	activeID  string
 	activeErr error
 	streamFn  func(context.Context, string, func(youtubePage) error) error
+}
+
+func TestYouTubeDeliveryFinishesBeforeSignOut(t *testing.T) {
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var signedOut, late atomic.Bool
+	s := authenticatedYouTubeService(nil, func(YouTubeEvent) { close(entered); <-release }, func(YouTubeEvent) {
+		if signedOut.Load() {
+			late.Store(true)
+		}
+	})
+	s.status.Connected = true
+	go func() { s.recordEvent(0, YouTubeEvent{TriggerEligible: true}); close(done) }()
+	<-entered
+	stopped := make(chan struct{})
+	go func() { s.SignOut(); signedOut.Store(true); close(stopped) }()
+	select {
+	case <-stopped:
+		close(release)
+		t.Fatal("sign-out returned during delivery")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	<-done
+	<-stopped
+	if late.Load() {
+		t.Fatal("old trigger ran after sign-out")
+	}
+	s.recordEvent(0, YouTubeEvent{TriggerEligible: true})
+	if s.Status().LastEvent != nil {
+		t.Fatal("stale event restored after sign-out")
+	}
+}
+
+func TestYouTubeRetryLimitSurvivesEmptyResponses(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	api := &fakeYouTubeAPI{streamFn: func(_ context.Context, _ string, receive func(youtubePage) error) error {
+		calls++
+		if calls > 10 {
+			cancel()
+			return context.Canceled
+		}
+		if err := receive(youtubePage{nextPageToken: "same-token"}); err != nil {
+			return err
+		}
+		return errors.New("connection lost")
+	}}
+	s := authenticatedYouTubeService(api, nil, nil)
+	s.consumeStream(ctx, 0, s.tokenSource, "chat", "video")
+	if calls != maxYouTubeStreamRetries+1 {
+		t.Fatalf("connections = %d, want %d", calls, maxYouTubeStreamRetries+1)
+	}
 }
 
 func (f *fakeYouTubeAPI) activeLiveChatID(context.Context, oauth2.TokenSource, string) (string, error) {

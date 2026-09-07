@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   BeginYouTubeAuth,
   ConnectYouTube,
@@ -11,7 +11,6 @@ import {
   StopOverlayServer,
 } from '../wailsjs/go/main/App';
 import { main } from '../wailsjs/go/models';
-import { EventsOn } from '../wailsjs/runtime/runtime';
 
 const defaultPort = 18500;
 
@@ -33,6 +32,8 @@ function App() {
   const [youtubeNotice, setYouTubeNotice] = useState('');
   const [youtubeBusy, setYouTubeBusy] = useState(false);
   const [lastYouTubeEvent, setLastYouTubeEvent] = useState<main.YouTubeEvent>();
+  const youtubeRequest = useRef(0);
+  const youtubeOperation = useRef(false);
 
   const refreshStatus = async () => {
     try {
@@ -48,24 +49,25 @@ function App() {
     return () => window.clearInterval(timer);
   }, []);
 
-  const refreshYouTubeStatus = async () => {
+  const refreshYouTubeStatus = async (force = false) => {
+    if (youtubeOperation.current && !force) return;
+    const request = ++youtubeRequest.current;
     try {
       const next = await GetYouTubeStatus();
+      if (request !== youtubeRequest.current) return;
       setYouTubeStatus(next);
-      if (next.lastEvent) setLastYouTubeEvent(next.lastEvent);
+      setLastYouTubeEvent(next.lastEvent);
     } catch (error) {
+      if (request !== youtubeRequest.current) return;
       setYouTubeNotice(errorMessage(error));
     }
   };
 
   useEffect(() => {
     void refreshYouTubeStatus();
-    const cancelEvent = EventsOn('youtube:event', (event: main.YouTubeEvent) =>
-      setLastYouTubeEvent(event),
-    );
     const timer = window.setInterval(() => void refreshYouTubeStatus(), 1000);
     return () => {
-      cancelEvent();
+      youtubeRequest.current++;
       window.clearInterval(timer);
     };
   }, []);
@@ -124,6 +126,9 @@ function App() {
   };
 
   const beginYouTubeAuth = async () => {
+    youtubeOperation.current = true;
+    youtubeRequest.current++;
+    setLastYouTubeEvent(undefined);
     setYouTubeBusy(true);
     setYouTubeNotice('');
     try {
@@ -131,42 +136,62 @@ function App() {
       setYouTubeNotice(
         '既定のブラウザでGoogle認証を完了してください（5分でタイムアウトします）。',
       );
-      await refreshYouTubeStatus();
+      await refreshYouTubeStatus(true);
     } catch (error) {
       setYouTubeNotice(errorMessage(error));
     } finally {
+      youtubeOperation.current = false;
       setYouTubeBusy(false);
     }
   };
 
   const connectYouTube = async () => {
+    youtubeOperation.current = true;
+    youtubeRequest.current++;
     setYouTubeBusy(true);
     setYouTubeNotice('');
     setLastYouTubeEvent(undefined);
     try {
       await ConnectYouTube(streamURL);
       setYouTubeNotice('YouTube Liveのコメント受信を開始しました。');
-      await refreshYouTubeStatus();
+      await refreshYouTubeStatus(true);
     } catch (error) {
       setYouTubeNotice(errorMessage(error));
-      await refreshYouTubeStatus();
+      await refreshYouTubeStatus(true);
     } finally {
+      youtubeOperation.current = false;
       setYouTubeBusy(false);
     }
   };
 
   const disconnectYouTube = async () => {
-    await DisconnectYouTube();
-    setLastYouTubeEvent(undefined);
-    setYouTubeNotice('YouTube Liveから切断しました。');
-    await refreshYouTubeStatus();
+    await endYouTubeSession(false);
   };
 
   const signOutYouTube = async () => {
-    await SignOutYouTube();
+    await endYouTubeSession(true);
+  };
+
+  const endYouTubeSession = async (signOut: boolean) => {
+    youtubeOperation.current = true;
+    youtubeRequest.current++;
+    setYouTubeBusy(true);
     setLastYouTubeEvent(undefined);
-    setYouTubeNotice('セッション内のGoogle認証情報を消去しました。');
-    await refreshYouTubeStatus();
+    try {
+      if (signOut) await SignOutYouTube();
+      else await DisconnectYouTube();
+      setYouTubeNotice(
+        signOut
+          ? 'セッション内のGoogle認証情報を消去しました。'
+          : 'YouTube Liveから切断しました。',
+      );
+      await refreshYouTubeStatus(true);
+    } catch (error) {
+      setYouTubeNotice(errorMessage(error));
+    } finally {
+      youtubeOperation.current = false;
+      setYouTubeBusy(false);
+    }
   };
 
   const running = status?.running ?? false;

@@ -36,14 +36,6 @@ func NewApp() *App {
 		openURL: func(ctx context.Context, url string) {
 			wailsruntime.BrowserOpenURL(ctx, url)
 		},
-		emit: func(event YouTubeEvent) {
-			app.lifecycleMu.Lock()
-			ctx := app.ctx
-			app.lifecycleMu.Unlock()
-			if ctx != nil {
-				wailsruntime.EventsEmit(ctx, "youtube:event", event)
-			}
-		},
 	})
 	return app
 }

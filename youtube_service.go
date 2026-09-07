@@ -66,6 +66,7 @@ type YouTubeService struct {
 	tokenSource  oauth2.TokenSource
 	authCancel   context.CancelFunc
 	streamCancel context.CancelFunc
+	tokenCancel  context.CancelFunc
 	authRun      uint64
 	streamRun    uint64
 }
@@ -141,6 +142,7 @@ func (s *YouTubeService) BeginAuth(baseCtx context.Context, clientID string) err
 	s.mu.Lock()
 	s.cancelLocked()
 	s.authRun++
+	s.streamRun++
 	run := s.authRun
 	s.authCancel = authCancel
 	s.tokenSource = nil
@@ -174,18 +176,21 @@ func (s *YouTubeService) finishAuth(baseCtx, authCtx context.Context, run uint64
 		s.setAuthError(run, result.err.Error())
 		return
 	}
-	token, err := config.Exchange(authCtx, result.code, oauth2.VerifierOption(verifier))
+	token, err := config.Exchange(youtubeOAuthHTTPContext(authCtx), result.code, oauth2.VerifierOption(verifier))
 	if err != nil || token == nil || !token.Valid() {
 		s.setAuthError(run, "Google認証を完了できませんでした。もう一度お試しください。")
 		return
 	}
-	tokenSource := config.TokenSource(baseCtx, token)
+	sessionCtx, sessionCancel := context.WithCancel(baseCtx)
+	tokenSource := newScopedYouTubeTokens(youtubeOAuthHTTPContext(sessionCtx), config, token)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if run != s.authRun || authCtx.Err() != nil {
+		sessionCancel()
 		return
 	}
 	s.tokenSource = tokenSource
+	s.tokenCancel = sessionCancel
 	s.authCancel = nil
 	s.status = YouTubeStatus{State: youtubeStateAuthorized, Authenticated: true}
 }
@@ -218,12 +223,19 @@ func (s *YouTubeService) Connect(baseCtx context.Context, rawURL string) error {
 	s.streamRun++
 	run := s.streamRun
 	tokenSource := s.tokenSource
+	if scoped, ok := tokenSource.(*scopedYouTubeTokens); ok {
+		tokenSource = scoped.withContext(streamCtx)
+	}
 	s.streamCancel = streamCancel
 	s.status = YouTubeStatus{State: youtubeStateConnecting, Authenticated: true, VideoID: videoID}
 	s.mu.Unlock()
 
 	lookupCtx, lookupCancel := context.WithTimeout(streamCtx, 20*time.Second)
-	liveChatID, err := s.deps.api.activeLiveChatID(lookupCtx, tokenSource, videoID)
+	lookupSource := tokenSource
+	if scoped, ok := tokenSource.(*scopedYouTubeTokenRequest); ok {
+		lookupSource = scoped.source.withContext(lookupCtx)
+	}
+	liveChatID, err := s.deps.api.activeLiveChatID(lookupCtx, lookupSource, videoID)
 	lookupCancel()
 	if err != nil {
 		streamCancel()
@@ -243,7 +255,10 @@ func (s *YouTubeService) Connect(baseCtx context.Context, rawURL string) error {
 	s.status.State = youtubeStateConnected
 	s.status.Connected = true
 	s.mu.Unlock()
-	go s.consumeStream(streamCtx, run, tokenSource, liveChatID, videoID)
+	go func() {
+		defer streamCancel()
+		s.consumeStream(streamCtx, run, tokenSource, liveChatID, videoID)
+	}()
 	return nil
 }
 
@@ -256,7 +271,6 @@ func (s *YouTubeService) consumeStream(ctx context.Context, run uint64, tokenSou
 
 	for {
 		err := s.deps.api.stream(ctx, tokenSource, liveChatID, pageToken, func(page youtubePage) error {
-			retries = 0
 			isHistory := firstResponse
 			firstResponse = false
 			if page.nextPageToken != "" {
@@ -309,7 +323,8 @@ func (s *YouTubeService) consumeStream(ctx context.Context, run uint64, tokenSou
 			delay = retryAfter
 		}
 		if delay > maxYouTubeRetryDelay {
-			delay = maxYouTubeRetryDelay
+			s.setStreamError(run, videoID, "YouTubeから長い待機時間が指定されました。時間をおいて再接続してください。")
+			return
 		}
 		if err := s.deps.wait(ctx, delay); err != nil {
 			return
@@ -319,8 +334,8 @@ func (s *YouTubeService) consumeStream(ctx context.Context, run uint64, tokenSou
 
 func (s *YouTubeService) recordEvent(run uint64, event YouTubeEvent) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if run != s.streamRun || !s.status.Connected {
-		s.mu.Unlock()
 		return
 	}
 	if event.Replayed {
@@ -332,7 +347,8 @@ func (s *YouTubeService) recordEvent(run uint64, event YouTubeEvent) {
 	s.status.LastEvent = &copy
 	emit := s.deps.emit
 	trigger := s.deps.trigger
-	s.mu.Unlock()
+	// Callbacks must be bounded and must not re-enter the service. Holding the
+	// lock ensures disconnect/sign-out cannot return before delivery completes.
 	if emit != nil {
 		emit(event)
 	}
@@ -384,6 +400,10 @@ func (s *YouTubeService) Shutdown() {
 }
 
 func (s *YouTubeService) cancelLocked() {
+	if s.tokenCancel != nil {
+		s.tokenCancel()
+		s.tokenCancel = nil
+	}
 	if s.authCancel != nil {
 		s.authCancel()
 		s.authCancel = nil
