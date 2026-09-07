@@ -22,26 +22,76 @@
         color: #fff;
       }
       main {
-        width: min(760px, calc(100vw - 64px));
-        padding: 32px;
+        width: min(860px, calc(100vw - 64px));
+        padding: 28px;
         border: 1px solid rgb(255 255 255 / 18%);
         border-radius: 24px;
         background: rgb(16 18 23 / 88%);
         box-shadow: 0 24px 80px rgb(0 0 0 / 32%);
-        text-align: center;
       }
       #status {
-        margin: 0 0 12px;
+        margin: 0 0 10px;
         color: #aab2c0;
-        font-size: 16px;
+        font-size: 15px;
       }
       #message {
         margin: 0;
-        font-size: clamp(36px, 7vw, 72px);
+        text-align: center;
+        font-size: clamp(32px, 6vw, 64px);
         overflow-wrap: anywhere;
       }
       #message.received {
         animation: pulse 600ms ease-out;
+      }
+      .diagnostics {
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: 20px;
+        align-items: center;
+        margin-top: 24px;
+        padding-top: 20px;
+        border-top: 1px solid rgb(255 255 255 / 12%);
+      }
+      .media {
+        position: relative;
+        width: 120px;
+        height: 76px;
+      }
+      .media img,
+      .media video {
+        position: absolute;
+        width: 64px;
+        height: 64px;
+        border-radius: 14px;
+        object-fit: cover;
+      }
+      .media video {
+        right: 0;
+        border: 1px solid rgb(255 255 255 / 24%);
+      }
+      #checks {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px 16px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        color: #c5ccd7;
+        font-size: 13px;
+      }
+      #checks li::before {
+        content: "…";
+        display: inline-block;
+        width: 1.4em;
+        color: #aab2c0;
+      }
+      #checks li.pass::before {
+        content: "✓";
+        color: #80e7aa;
+      }
+      #checks li.fail::before {
+        content: "✗";
+        color: #ff8e8e;
       }
       @keyframes pulse {
         50% {
@@ -53,39 +103,167 @@
   </head>
   <body>
     <main>
-      <p id="status">接続しています…</p>
+      <p id="status">Overlay SDKを読み込んでいます…</p>
       <p id="message">tsumikit</p>
+      <section
+        class="diagnostics"
+        aria-label="OBS CEF compatibility diagnostics"
+      >
+        <div class="media" aria-label="画像と動画の表示確認">
+          <img
+            alt="画像表示確認"
+            src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64'%3E%3Crect width='64' height='64' rx='14' fill='%23667eea'/%3E%3Cpath d='M16 43l11-12 8 8 6-7 8 11z' fill='white'/%3E%3Ccircle cx='22' cy='21' r='5' fill='%2380e7aa'/%3E%3C/svg%3E"
+          />
+          <video
+            id="video-check"
+            muted
+            playsinline
+            autoplay
+            aria-label="動画自動再生確認"
+          ></video>
+          <audio
+            id="audio-check"
+            autoplay
+            src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA="
+          ></audio>
+        </div>
+        <ul id="checks">
+          <li data-check="sdk">SDK ready / complete</li>
+          <li data-check="image">画像・透過表示</li>
+          <li data-check="audio">音声自動再生</li>
+          <li data-check="video">動画自動再生</li>
+          <li data-check="fetch">外部fetch拒否</li>
+          <li data-check="websocket">外部WebSocket拒否</li>
+          <li data-check="worker">worker拒否</li>
+          <li data-check="popup">popup拒否</li>
+          <li data-check="webrtc">WebRTC拒否</li>
+          <li data-check="navigation">外部navigation拒否</li>
+        </ul>
+      </section>
     </main>
+    <script src="./sdk.js"></script>
     <script>
-      const status = document.getElementById('status');
-      const message = document.getElementById('message');
-      const capability = window.location.pathname.slice('/overlay/'.length);
-      const socket = new WebSocket(
-        `ws://${window.location.host}/ws/${encodeURIComponent(capability)}`,
+      const status = document.getElementById("status");
+      const message = document.getElementById("message");
+      const checks = new Map(
+        Array.from(document.querySelectorAll("[data-check]")).map((element) => [
+          element.dataset.check,
+          element,
+        ]),
+      );
+      const result = (name, passed) => {
+        const element = checks.get(name);
+        if (element) element.classList.add(passed ? "pass" : "fail");
+      };
+
+      const unsubscribe = OverlaySDK.onTrigger((event) => {
+        if (event.type !== "test" || typeof event.message !== "string") return;
+        message.classList.remove("received");
+        void message.offsetWidth;
+        message.textContent = event.message;
+        message.classList.add("received");
+        status.textContent = "テストイベントを受信しました";
+        window.setTimeout(() => {
+          OverlaySDK.complete(event.id);
+          result("sdk", true);
+        }, 650);
+      });
+      window.addEventListener("pagehide", unsubscribe, { once: true });
+      OverlaySDK.ready();
+      status.textContent = "OBS接続準備完了";
+
+      const image = document.querySelector(".media img");
+      if (image.complete) result("image", image.naturalWidth > 0);
+      else
+        image.addEventListener("load", () => result("image", true), {
+          once: true,
+        });
+      image.addEventListener("error", () => result("image", false), {
+        once: true,
+      });
+
+      const audio = document.getElementById("audio-check");
+      audio
+        .play()
+        .then(() => result("audio", true))
+        .catch(() => result("audio", false));
+
+      const video = document.getElementById("video-check");
+      let videoStream;
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = 64;
+        canvas.height = 64;
+        const context = canvas.getContext("2d");
+        context.fillStyle = "#58d68d";
+        context.fillRect(0, 0, 64, 64);
+        context.fillStyle = "#101217";
+        context.font = "bold 24px sans-serif";
+        context.fillText("▶", 20, 41);
+        videoStream = canvas.captureStream(1);
+        video.srcObject = videoStream;
+        video
+          .play()
+          .then(() => result("video", true))
+          .catch(() => result("video", false));
+      } catch {
+        result("video", false);
+      }
+
+      window.addEventListener(
+        "pagehide",
+        () => videoStream?.getTracks().forEach((track) => track.stop()),
+        { once: true },
       );
 
-      socket.addEventListener('open', () => {
-        status.textContent = 'OBS接続準備完了';
-      });
-      socket.addEventListener('message', (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          if (payload.type !== 'test' || typeof payload.message !== 'string') return;
-          message.classList.remove('received');
-          void message.offsetWidth;
-          message.textContent = payload.message;
-          message.classList.add('received');
-          status.textContent = 'テストイベントを受信しました';
-        } catch {
-          status.textContent = '不正なイベントを受信しました';
-        }
-      });
-      socket.addEventListener('close', () => {
-        status.textContent = '接続が切断されました';
-      });
-      socket.addEventListener('error', () => {
-        status.textContent = '接続エラー';
-      });
+      fetch("https://example.invalid/tsumikit-security-probe", {
+        mode: "no-cors",
+      })
+        .then(() => result("fetch", false))
+        .catch(() => result("fetch", true));
+      try {
+        const externalSocket = new WebSocket(
+          "wss://example.invalid/tsumikit-security-probe",
+        );
+        externalSocket.addEventListener("open", () => {
+          result("websocket", false);
+          externalSocket.close();
+        });
+        externalSocket.addEventListener(
+          "error",
+          () => result("websocket", true),
+          { once: true },
+        );
+      } catch {
+        result("websocket", true);
+      }
+      const workerURL = URL.createObjectURL(
+        new Blob(["postMessage(1)"], { type: "text/javascript" }),
+      );
+      try {
+        const worker = new Worker(workerURL);
+        worker.terminate();
+        result("worker", false);
+      } catch {
+        result("worker", true);
+      } finally {
+        URL.revokeObjectURL(workerURL);
+      }
+      const popup = window.open(
+        "https://example.invalid/tsumikit-navigation-probe",
+        "_blank",
+      );
+      const externalNavigationBlocked = popup === null;
+      result("popup", externalNavigationBlocked);
+      result("navigation", externalNavigationBlocked);
+      if (popup) popup.close();
+      try {
+        const peer = new RTCPeerConnection();
+        peer.close();
+        result("webrtc", false);
+      } catch {
+        result("webrtc", true);
+      }
     </script>
   </body>
 </html>
