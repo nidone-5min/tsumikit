@@ -1,11 +1,17 @@
 import { useEffect, useState } from 'react';
 import {
+  BeginYouTubeAuth,
+  ConnectYouTube,
+  DisconnectYouTube,
   GetOverlayStatus,
+  GetYouTubeStatus,
   SendTestEvent,
+  SignOutYouTube,
   StartOverlayServer,
   StopOverlayServer,
 } from '../wailsjs/go/main/App';
 import { main } from '../wailsjs/go/models';
+import { EventsOn } from '../wailsjs/runtime/runtime';
 
 const defaultPort = 18500;
 
@@ -21,6 +27,12 @@ function App() {
   const [message, setMessage] = useState('tsumikitからテストイベントを送信');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+  const [youtubeStatus, setYouTubeStatus] = useState<main.YouTubeStatus>();
+  const [clientID, setClientID] = useState('');
+  const [streamURL, setStreamURL] = useState('');
+  const [youtubeNotice, setYouTubeNotice] = useState('');
+  const [youtubeBusy, setYouTubeBusy] = useState(false);
+  const [lastYouTubeEvent, setLastYouTubeEvent] = useState<main.YouTubeEvent>();
 
   const refreshStatus = async () => {
     try {
@@ -34,6 +46,28 @@ function App() {
     void refreshStatus();
     const timer = window.setInterval(() => void refreshStatus(), 1000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  const refreshYouTubeStatus = async () => {
+    try {
+      const next = await GetYouTubeStatus();
+      setYouTubeStatus(next);
+      if (next.lastEvent) setLastYouTubeEvent(next.lastEvent);
+    } catch (error) {
+      setYouTubeNotice(errorMessage(error));
+    }
+  };
+
+  useEffect(() => {
+    void refreshYouTubeStatus();
+    const cancelEvent = EventsOn('youtube:event', (event: main.YouTubeEvent) =>
+      setLastYouTubeEvent(event),
+    );
+    const timer = window.setInterval(() => void refreshYouTubeStatus(), 1000);
+    return () => {
+      cancelEvent();
+      window.clearInterval(timer);
+    };
   }, []);
 
   const startServer = async () => {
@@ -87,6 +121,52 @@ function App() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const beginYouTubeAuth = async () => {
+    setYouTubeBusy(true);
+    setYouTubeNotice('');
+    try {
+      await BeginYouTubeAuth(clientID);
+      setYouTubeNotice(
+        '既定のブラウザでGoogle認証を完了してください（5分でタイムアウトします）。',
+      );
+      await refreshYouTubeStatus();
+    } catch (error) {
+      setYouTubeNotice(errorMessage(error));
+    } finally {
+      setYouTubeBusy(false);
+    }
+  };
+
+  const connectYouTube = async () => {
+    setYouTubeBusy(true);
+    setYouTubeNotice('');
+    setLastYouTubeEvent(undefined);
+    try {
+      await ConnectYouTube(streamURL);
+      setYouTubeNotice('YouTube Liveのコメント受信を開始しました。');
+      await refreshYouTubeStatus();
+    } catch (error) {
+      setYouTubeNotice(errorMessage(error));
+      await refreshYouTubeStatus();
+    } finally {
+      setYouTubeBusy(false);
+    }
+  };
+
+  const disconnectYouTube = async () => {
+    await DisconnectYouTube();
+    setLastYouTubeEvent(undefined);
+    setYouTubeNotice('YouTube Liveから切断しました。');
+    await refreshYouTubeStatus();
+  };
+
+  const signOutYouTube = async () => {
+    await SignOutYouTube();
+    setLastYouTubeEvent(undefined);
+    setYouTubeNotice('セッション内のGoogle認証情報を消去しました。');
+    await refreshYouTubeStatus();
   };
 
   const running = status?.running ?? false;
@@ -207,6 +287,133 @@ function App() {
             {notice || status?.error}
           </p>
         )}
+
+        <div className="mt-10 border-t border-[#303642] pt-8">
+          <p className="mb-2 text-[13px] font-bold tracking-[0.12em] text-[#9ba4b5]">
+            YOUTUBE API POC
+          </p>
+          <h2 className="text-2xl font-bold">ライブコメント受信</h2>
+          <p className="mt-2 text-sm leading-6 text-[#9ba4b5]">
+            Google Desktop OAuthクライアントIDと配信URLを使い、公式の streamList
+            APIへ接続します。認証情報はアプリ終了時に破棄されます。
+          </p>
+
+          <div className="mt-5 flex items-center gap-3 rounded-xl border border-[#303642] bg-[#12151a] p-4">
+            <span
+              className={`h-3 w-3 rounded-full ${youtubeStatus?.connected ? 'bg-[#ff5f57] shadow-[0_0_16px_rgba(255,95,87,0.62)]' : youtubeStatus?.authenticated ? 'bg-[#58d68d]' : 'bg-[#727987]'}`}
+              aria-hidden="true"
+            />
+            <div>
+              <p className="font-bold">
+                {youtubeStatus?.connected
+                  ? 'コメント受信中'
+                  : youtubeStatus?.state === 'authorizing'
+                    ? 'Google認証待ち'
+                    : youtubeStatus?.authenticated
+                      ? 'Google認証済み'
+                      : '未認証'}
+              </p>
+              <p className="text-sm text-[#9ba4b5]">
+                履歴 {youtubeStatus?.initialMessages ?? 0}件 / リアルタイム{' '}
+                {youtubeStatus?.realtimeMessages ?? 0}件
+              </p>
+            </div>
+          </div>
+
+          <label className="mt-5 grid gap-2 text-sm font-bold text-[#cdd3dd]">
+            Google Desktop OAuthクライアントID
+            <input
+              className="rounded-lg border border-[#3b4250] bg-[#101217] px-4 py-3 text-base text-white disabled:opacity-60"
+              value={clientID}
+              disabled={youtubeBusy || youtubeStatus?.connected}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="….apps.googleusercontent.com"
+              onChange={(event) => setClientID(event.target.value)}
+            />
+          </label>
+          <div className="mt-3 flex gap-3">
+            <button
+              className="rounded-lg bg-[#e8eaed] px-5 py-3 font-bold text-[#202124] disabled:cursor-not-allowed disabled:opacity-50"
+              type="button"
+              disabled={youtubeBusy || youtubeStatus?.connected || !clientID}
+              onClick={() => void beginYouTubeAuth()}
+            >
+              Google認証
+            </button>
+            <button
+              className="rounded-lg border border-[#505866] px-5 py-3 font-bold disabled:cursor-not-allowed disabled:opacity-50"
+              type="button"
+              disabled={youtubeBusy || !youtubeStatus?.authenticated}
+              onClick={() => void signOutYouTube()}
+            >
+              認証を解除
+            </button>
+          </div>
+
+          <label className="mt-6 grid gap-2 text-sm font-bold text-[#cdd3dd]">
+            YouTube Live配信URL
+            <input
+              className="rounded-lg border border-[#3b4250] bg-[#101217] px-4 py-3 text-base text-white disabled:opacity-60"
+              type="url"
+              value={streamURL}
+              disabled={youtubeBusy || youtubeStatus?.connected}
+              placeholder="https://www.youtube.com/watch?v=…"
+              onChange={(event) => setStreamURL(event.target.value)}
+            />
+          </label>
+          <div className="mt-3 flex gap-3">
+            <button
+              className="rounded-lg bg-[#ff5f57] px-5 py-3 font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
+              type="button"
+              disabled={
+                youtubeBusy ||
+                youtubeStatus?.connected ||
+                !youtubeStatus?.authenticated ||
+                !streamURL
+              }
+              onClick={() => void connectYouTube()}
+            >
+              受信開始
+            </button>
+            <button
+              className="rounded-lg border border-[#505866] px-5 py-3 font-bold disabled:cursor-not-allowed disabled:opacity-50"
+              type="button"
+              disabled={youtubeBusy || !youtubeStatus?.connected}
+              onClick={() => void disconnectYouTube()}
+            >
+              切断
+            </button>
+          </div>
+
+          {lastYouTubeEvent && (
+            <div className="mt-6 rounded-xl border border-[#303642] bg-[#12151a] p-4">
+              <div className="flex items-center justify-between gap-3">
+                <p className="min-w-0 truncate font-bold">
+                  {lastYouTubeEvent.author || 'YouTubeユーザー'}
+                </p>
+                <span className="shrink-0 rounded-full bg-[#242a34] px-3 py-1 text-xs text-[#cdd3dd]">
+                  {lastYouTubeEvent.replayed
+                    ? '初回履歴（演出対象外）'
+                    : 'リアルタイム'}
+                </span>
+              </div>
+              <p className="mt-2 break-words text-[#dce2ea]">
+                {lastYouTubeEvent.message ||
+                  `イベント: ${lastYouTubeEvent.type}`}
+              </p>
+            </div>
+          )}
+
+          {(youtubeNotice || youtubeStatus?.error) && (
+            <p
+              className="mt-6 rounded-lg bg-[#242a34] p-3 text-sm text-[#dce2ea]"
+              aria-live="polite"
+            >
+              {youtubeStatus?.error || youtubeNotice}
+            </p>
+          )}
+        </div>
       </section>
     </main>
   );

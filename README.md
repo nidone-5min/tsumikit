@@ -2,7 +2,7 @@
 
 YouTube Live / Twitch のイベントを受け取り、OBS Browser Source で演出を実行するデスクトップアプリです。
 
-現在は Phase 0 の技術検証段階です。PR-005 ではWindowsのシステムトレイ／macOSのメニューバー常駐と、シングルインスタンス動作を確認するPoCを追加しています。
+現在は Phase 0 の技術検証段階です。PR-006 ではGoogle Desktop OAuth（PKCE）とYouTube Liveの低遅延コメント受信を確認するPoCを追加しています。
 
 ## 採用バージョン
 
@@ -83,6 +83,20 @@ SDKとオーバーレイHTMLはこのPoC専用です。ZIPパッケージ向け�
 同じ利用者セッションでtsumikitをもう一度起動すると、新しいプロセスは終了し、既存のウィンドウが前面に表示されます。2回目の起動に渡されたコマンドライン引数と作業ディレクトリは処理しません。
 
 TrayはWails v2の外部イベントループへ`fyne.io/systray`を統合するPhase 0実装です。Trayの初期化に失敗した環境では、ウィンドウを閉じると通常どおりアプリを終了し、画面を再表示できない状態で常駐しません。
+
+## YouTube Liveコメント受信PoC
+
+このPoCを試すには、Google Cloud ConsoleでYouTube Data API v3を有効にし、アプリケーションの種類が「デスクトップ アプリ」のOAuth 2.0クライアントを作成してください。クライアントシークレットは使用しません。
+
+1. アプリ画面へDesktop OAuthクライアントID（末尾が`.apps.googleusercontent.com`）を入力し、「Google認証」を押します。
+2. OSの既定ブラウザで、読み取り専用のYouTube権限を許可します。
+3. 配信中のYouTube Live URLを入力し、「受信開始」を押します。
+
+対応URLは`https://www.youtube.com/watch?v=...`、`https://www.youtube.com/live/...`、`https://youtu.be/...`です。アプリは`videos.list`の`liveStreamingDetails.activeLiveChatId`を解決した後、`liveChatMessages.streamList`でコメントを受信します。
+
+最初のAPIレスポンスに含まれる直近の履歴は画面確認だけに使い、演出対象にはしません。2回目以降のレスポンスだけをリアルタイムイベントとして扱い、切断からの再開時は最後に受け取った`nextPageToken`をメモリ内で使用します。
+
+OAuthコールバックは`127.0.0.1`のランダムな空きポートだけで一時的に待ち受け、5分以内に成功・拒否・タイムアウトのいずれかで停止します。`state`とPKCE verifierは認証要求ごとに生成し、認証コードは一度だけ受理します。アクセストークンと更新トークン、クライアントID、配信URL、受信コメントは永続化やログ出力を行いません。認証トークンはセッション中だけ保持するため、アプリを再起動した場合は再認証が必要です。
 
 ## 品質チェック
 

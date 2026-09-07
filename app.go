@@ -7,6 +7,8 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+
+	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 const defaultOverlayPort = 18500
@@ -16,6 +18,7 @@ type App struct {
 	lifecycleMu   sync.Mutex
 	ctx           context.Context
 	overlayServer *OverlayServer
+	youtube       *YouTubeService
 	lifecycle     desktopLifecycle
 	tray          trayReadiness
 	stopSignals   context.CancelFunc
@@ -25,10 +28,24 @@ type App struct {
 
 // NewApp creates the application backend.
 func NewApp() *App {
-	return &App{
+	app := &App{
 		overlayServer: NewOverlayServer(),
 		lifecycle:     wailsDesktopLifecycle{},
 	}
+	app.youtube = newYouTubeService(youtubeServiceDependencies{
+		openURL: func(ctx context.Context, url string) {
+			wailsruntime.BrowserOpenURL(ctx, url)
+		},
+		emit: func(event YouTubeEvent) {
+			app.lifecycleMu.Lock()
+			ctx := app.ctx
+			app.lifecycleMu.Unlock()
+			if ctx != nil {
+				wailsruntime.EventsEmit(ctx, "youtube:event", event)
+			}
+		},
+	})
+	return app
 }
 
 // startup stores the Wails context for future application services.
@@ -58,6 +75,7 @@ func (a *App) shutdown(ctx context.Context) {
 	if stopSignals != nil {
 		stopSignals()
 	}
+	a.youtube.Shutdown()
 
 	if err := a.overlayServer.Stop(ctx); err != nil {
 		a.overlayServer.setLastError(err)
@@ -91,4 +109,41 @@ func (a *App) StopOverlayServer() error {
 // SendTestEvent broadcasts a test message to connected Browser Sources.
 func (a *App) SendTestEvent(message string) error {
 	return a.overlayServer.SendTestEvent(message)
+}
+
+// GetYouTubeStatus reports the in-memory OAuth and live chat connection state.
+func (a *App) GetYouTubeStatus() YouTubeStatus {
+	return a.youtube.Status()
+}
+
+// BeginYouTubeAuth starts Google Desktop OAuth in the system browser.
+func (a *App) BeginYouTubeAuth(clientID string) error {
+	a.lifecycleMu.Lock()
+	ctx := a.ctx
+	a.lifecycleMu.Unlock()
+	if ctx == nil {
+		return fmt.Errorf("アプリの起動完了後にGoogle認証を開始してください")
+	}
+	return a.youtube.BeginAuth(ctx, clientID)
+}
+
+// ConnectYouTube resolves the active live chat and starts streamList reception.
+func (a *App) ConnectYouTube(streamURL string) error {
+	a.lifecycleMu.Lock()
+	ctx := a.ctx
+	a.lifecycleMu.Unlock()
+	if ctx == nil {
+		return fmt.Errorf("アプリの起動完了後にYouTubeへ接続してください")
+	}
+	return a.youtube.Connect(ctx, streamURL)
+}
+
+// DisconnectYouTube stops chat reception while preserving the session token.
+func (a *App) DisconnectYouTube() {
+	a.youtube.Disconnect()
+}
+
+// SignOutYouTube clears the session-only OAuth token and stops reception.
+func (a *App) SignOutYouTube() {
+	a.youtube.SignOut()
 }
