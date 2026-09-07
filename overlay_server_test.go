@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -47,6 +48,27 @@ func dialOverlay(t *testing.T, server *OverlayServer) *websocket.Conn {
 	}
 	t.Cleanup(func() { _ = connection.Close() })
 	return connection
+}
+
+func markOverlayReady(t *testing.T, server *OverlayServer, connection *websocket.Conn) {
+	t.Helper()
+	if err := connection.WriteJSON(clientMessage{Type: "ready", SDKVersion: overlaySDKVersion}); err != nil {
+		t.Fatalf("write ready message: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		server.mu.Lock()
+		ready := false
+		for client := range server.clients {
+			ready = ready || client.ready
+		}
+		server.mu.Unlock()
+		if ready {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("overlay client did not become ready")
 }
 
 func overlayOrigin(t *testing.T, overlayURL string) string {
@@ -111,8 +133,68 @@ func TestOverlayServerServesOverlayHTML(t *testing.T) {
 	if got := response.Header.Get("Referrer-Policy"); got != "no-referrer" {
 		t.Errorf("Referrer-Policy = %q, want no-referrer", got)
 	}
+	if got := response.Header.Get("X-Frame-Options"); got != "DENY" {
+		t.Errorf("X-Frame-Options = %q, want DENY", got)
+	}
+	if got := response.Header.Get("Cross-Origin-Resource-Policy"); got != "same-origin" {
+		t.Errorf("Cross-Origin-Resource-Policy = %q, want same-origin", got)
+	}
+	if got := response.Header.Get("Permissions-Policy"); !strings.Contains(got, "camera=()") || !strings.Contains(got, "autoplay=(self)") {
+		t.Errorf("Permissions-Policy = %q, want denied sensitive features and same-origin autoplay", got)
+	}
+	csp := response.Header.Get("Content-Security-Policy")
+	for _, directive := range []string{
+		"default-src 'none'",
+		"connect-src 'self' ws://127.0.0.1:",
+		"worker-src 'none'",
+		"webrtc 'block'",
+		"frame-ancestors 'none'",
+		"sandbox allow-scripts allow-same-origin",
+	} {
+		if !strings.Contains(csp, directive) {
+			t.Errorf("Content-Security-Policy = %q, missing %q", csp, directive)
+		}
+	}
 	if !strings.Contains(string(body), "tsumikit overlay") {
 		t.Error("overlay HTML does not contain its title")
+	}
+	if !strings.Contains(string(body), `<script src="./sdk.js"></script>`) {
+		t.Error("overlay HTML does not load the fixed SDK asset")
+	}
+}
+
+func TestOverlayServerServesCapabilityScopedSDK(t *testing.T) {
+	server := startTestOverlayServer(t)
+	client := newTestHTTPClient()
+
+	response, err := client.Get(server.Status().URL + "sdk.js")
+	if err != nil {
+		t.Fatalf("GET sdk.js: %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read sdk.js: %v", readErr)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	if got := response.Header.Get("Content-Type"); !strings.HasPrefix(got, "text/javascript") {
+		t.Errorf("Content-Type = %q, want text/javascript", got)
+	}
+	if !strings.Contains(string(body), "OverlaySDK") {
+		t.Error("SDK asset does not define OverlaySDK")
+	}
+
+	status := server.Status()
+	wrongURL := fmt.Sprintf("http://127.0.0.1:%d%swrong-capability/sdk.js", status.Port, overlayPathPrefix)
+	wrongResponse, err := client.Get(wrongURL)
+	if err != nil {
+		t.Fatalf("GET wrong SDK URL: %v", err)
+	}
+	_ = wrongResponse.Body.Close()
+	if wrongResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("wrong SDK status = %d, want %d", wrongResponse.StatusCode, http.StatusNotFound)
 	}
 }
 
@@ -270,6 +352,7 @@ func TestOverlayServerBroadcastsTestEvent(t *testing.T) {
 	server := startTestOverlayServer(t)
 	connection := dialOverlay(t, server)
 	waitForConnections(t, server, 1)
+	markOverlayReady(t, server, connection)
 
 	if err := server.SendTestEvent("hello OBS"); err != nil {
 		t.Fatalf("SendTestEvent(): %v", err)
@@ -281,12 +364,110 @@ func TestOverlayServerBroadcastsTestEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadMessage(): %v", err)
 	}
-	var event TestEvent
-	if err := json.Unmarshal(payload, &event); err != nil {
+	var message triggerMessage
+	if err := json.Unmarshal(payload, &message); err != nil {
 		t.Fatalf("Unmarshal(): %v", err)
 	}
-	if event.Type != "test" || event.Message != "hello OBS" || event.SentAt.IsZero() {
-		t.Fatalf("event = %#v", event)
+	if message.Type != "trigger" || message.Event.ID == "" || message.Event.Type != "test" ||
+		message.Event.Message != "hello OBS" || message.Event.SentAt.IsZero() {
+		t.Fatalf("message = %#v", message)
+	}
+
+	if err := connection.WriteJSON(clientMessage{Type: "complete", EventID: message.Event.ID}); err != nil {
+		t.Fatalf("write complete message: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		server.mu.Lock()
+		activeID := ""
+		for client := range server.clients {
+			activeID = client.activeID
+		}
+		server.mu.Unlock()
+		if activeID == "" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("complete message did not clear the active event")
+}
+
+func TestOverlayServerRequiresReadyBeforeTrigger(t *testing.T) {
+	server := startTestOverlayServer(t)
+	_ = dialOverlay(t, server)
+	waitForConnections(t, server, 1)
+
+	if err := server.SendTestEvent("not ready"); !errors.Is(err, errNoReadyClients) {
+		t.Fatalf("SendTestEvent() error = %v, want %v", err, errNoReadyClients)
+	}
+}
+
+func TestOverlayServerRejectsInvalidSDKMessages(t *testing.T) {
+	server := startTestOverlayServer(t)
+	connection := dialOverlay(t, server)
+	waitForConnections(t, server, 1)
+
+	if err := connection.WriteJSON(map[string]any{
+		"type": "ready", "sdkVersion": overlaySDKVersion, "unexpected": true,
+	}); err != nil {
+		t.Fatalf("write invalid SDK message: %v", err)
+	}
+	waitForConnections(t, server, 0)
+}
+
+func TestOverlayServerIgnoresCompletionForAnotherEvent(t *testing.T) {
+	server := startTestOverlayServer(t)
+	connection := dialOverlay(t, server)
+	waitForConnections(t, server, 1)
+	markOverlayReady(t, server, connection)
+	if err := server.SendTestEvent("active event"); err != nil {
+		t.Fatalf("SendTestEvent(): %v", err)
+	}
+
+	if err := connection.WriteJSON(clientMessage{Type: "complete", EventID: "another-event"}); err != nil {
+		t.Fatalf("write complete message: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	server.mu.Lock()
+	activeID := ""
+	for client := range server.clients {
+		activeID = client.activeID
+	}
+	server.mu.Unlock()
+	if activeID == "" {
+		t.Fatal("completion for another event cleared the active event")
+	}
+}
+
+func TestOverlayServerRejectsOverlappingTrigger(t *testing.T) {
+	server := startTestOverlayServer(t)
+	connection := dialOverlay(t, server)
+	waitForConnections(t, server, 1)
+	markOverlayReady(t, server, connection)
+	if err := server.SendTestEvent("first"); err != nil {
+		t.Fatalf("first SendTestEvent(): %v", err)
+	}
+	if err := server.SendTestEvent("second"); !errors.Is(err, errOverlayBusy) {
+		t.Fatalf("second SendTestEvent() error = %v, want %v", err, errOverlayBusy)
+	}
+}
+
+func TestOverlayServerExpiresIncompleteTrigger(t *testing.T) {
+	server := NewOverlayServer()
+	server.eventFor = 20 * time.Millisecond
+	if err := server.Start(0); err != nil {
+		t.Fatalf("Start(0): %v", err)
+	}
+	t.Cleanup(func() { _ = server.Stop(context.Background()) })
+	connection := dialOverlay(t, server)
+	waitForConnections(t, server, 1)
+	markOverlayReady(t, server, connection)
+	if err := server.SendTestEvent("first"); err != nil {
+		t.Fatalf("first SendTestEvent(): %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if err := server.SendTestEvent("after timeout"); err != nil {
+		t.Fatalf("SendTestEvent() after timeout: %v", err)
 	}
 }
 

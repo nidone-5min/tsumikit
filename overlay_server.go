@@ -27,15 +27,20 @@ const (
 	clientReadLimit       = 64 * 1024
 	clientPingInterval    = 15 * time.Second
 	clientLeaseTimeout    = 45 * time.Second
+	eventCompletionLimit  = 30 * time.Second
 	capabilityBytes       = 32
+	eventIDBytes          = 16
+	overlaySDKVersion     = "1"
 )
 
 var (
 	errOverlayNotRunning = errors.New("オーバーレイサーバーは停止しています")
 	errNoOverlayClients  = errors.New("接続中のOBS Browser Sourceがありません")
+	errNoReadyClients    = errors.New("接続中のOBS Browser Sourceがまだ準備完了していません")
+	errOverlayBusy       = errors.New("前のテスト演出がまだ完了していません")
 )
 
-//go:embed overlay/index.html
+//go:embed overlay/index.html overlay/sdk.js
 var overlayFiles embed.FS
 
 // OverlayStatus is returned to the Wails frontend.
@@ -49,16 +54,31 @@ type OverlayStatus struct {
 
 // TestEvent is sent to connected overlay clients.
 type TestEvent struct {
+	ID      string    `json:"id"`
 	Type    string    `json:"type"`
 	Message string    `json:"message"`
 	SentAt  time.Time `json:"sentAt"`
 }
 
+type triggerMessage struct {
+	Type  string    `json:"type"`
+	Event TestEvent `json:"event"`
+}
+
+type clientMessage struct {
+	Type       string `json:"type"`
+	SDKVersion string `json:"sdkVersion,omitempty"`
+	EventID    string `json:"eventId,omitempty"`
+}
+
 type overlayClient struct {
-	connection *websocket.Conn
-	writeMu    sync.Mutex
-	done       chan struct{}
-	closeOnce  sync.Once
+	connection  *websocket.Conn
+	writeMu     sync.Mutex
+	done        chan struct{}
+	closeOnce   sync.Once
+	ready       bool
+	activeID    string
+	activeUntil time.Time
 }
 
 func (c *overlayClient) write(payload []byte) error {
@@ -107,6 +127,7 @@ type OverlayServer struct {
 	lastError  string
 	pingEvery  time.Duration
 	leaseFor   time.Duration
+	eventFor   time.Duration
 }
 
 // NewOverlayServer constructs an idle overlay server.
@@ -115,6 +136,7 @@ func NewOverlayServer() *OverlayServer {
 		clients:   make(map[*overlayClient]struct{}),
 		pingEvery: clientPingInterval,
 		leaseFor:  clientLeaseTimeout,
+		eventFor:  eventCompletionLimit,
 	}
 }
 
@@ -240,7 +262,7 @@ func (s *OverlayServer) Status() OverlayStatus {
 		Error:       s.lastError,
 	}
 	if status.Running {
-		status.URL = fmt.Sprintf("http://127.0.0.1:%d%s%s", status.Port, overlayPathPrefix, s.capability)
+		status.URL = fmt.Sprintf("http://127.0.0.1:%d%s%s/", status.Port, overlayPathPrefix, s.capability)
 	}
 	return status
 }
@@ -255,7 +277,12 @@ func (s *OverlayServer) SendTestEvent(message string) error {
 		return errors.New("テストメッセージは200文字以内で入力してください")
 	}
 
-	event, err := json.Marshal(TestEvent{Type: "test", Message: message, SentAt: time.Now().UTC()})
+	eventID, err := newEventID()
+	if err != nil {
+		return fmt.Errorf("テストイベントIDを作成できませんでした: %w", err)
+	}
+	event := TestEvent{ID: eventID, Type: "test", Message: message, SentAt: time.Now().UTC()}
+	payload, err := json.Marshal(triggerMessage{Type: "trigger", Event: event})
 	if err != nil {
 		return fmt.Errorf("テストイベントを作成できませんでした: %w", err)
 	}
@@ -266,17 +293,36 @@ func (s *OverlayServer) SendTestEvent(message string) error {
 		return errOverlayNotRunning
 	}
 	clients := make([]*overlayClient, 0, len(s.clients))
+	now := time.Now()
 	for client := range s.clients {
-		clients = append(clients, client)
+		if client.activeID != "" && !now.Before(client.activeUntil) {
+			client.activeID = ""
+			client.activeUntil = time.Time{}
+		}
+		if client.ready && client.activeID != "" {
+			s.mu.Unlock()
+			return errOverlayBusy
+		}
 	}
+	for client := range s.clients {
+		if client.ready {
+			client.activeID = eventID
+			client.activeUntil = now.Add(s.eventFor)
+			clients = append(clients, client)
+		}
+	}
+	totalClients := len(s.clients)
 	s.mu.Unlock()
-	if len(clients) == 0 {
+	if totalClients == 0 {
 		return errNoOverlayClients
+	}
+	if len(clients) == 0 {
+		return errNoReadyClients
 	}
 
 	var firstErr error
 	for _, client := range clients {
-		if err := client.write(event); err != nil {
+		if err := client.write(payload); err != nil {
 			s.removeClient(client)
 			_ = client.connection.Close()
 			if firstErr == nil {
@@ -291,11 +337,13 @@ func (s *OverlayServer) SendTestEvent(message string) error {
 }
 
 func (s *OverlayServer) serveOverlay(authority, capability string, w http.ResponseWriter, r *http.Request) {
+	setOverlaySecurityHeaders(w, authority)
 	if !validAuthority(r, authority) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	if !validCapabilityPath(r.URL.Path, overlayPathPrefix, capability) {
+	asset, ok := overlayAsset(r.URL.Path, capability)
+	if !ok {
 		http.NotFound(w, r)
 		return
 	}
@@ -305,17 +353,30 @@ func (s *OverlayServer) serveOverlay(authority, capability string, w http.Respon
 		return
 	}
 
-	content, err := overlayFiles.ReadFile("overlay/index.html")
+	filename := "overlay/index.html"
+	contentType := "text/html; charset=utf-8"
+	if asset == "sdk.js" {
+		filename = "overlay/sdk.js"
+		contentType = "text/javascript; charset=utf-8"
+	}
+	content, err := overlayFiles.ReadFile(filename)
 	if err != nil {
 		http.Error(w, "overlay unavailable", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Type", contentType)
+	_, _ = w.Write(content)
+}
+
+func setOverlaySecurityHeaders(w http.ResponseWriter, authority string) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'")
-	_, _ = w.Write(content)
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	w.Header().Set("X-DNS-Prefetch-Control", "off")
+	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), display-capture=(), payment=(), usb=(), serial=(), hid=(), clipboard-read=(), clipboard-write=(), fullscreen=(self), autoplay=(self)")
+	w.Header().Set("Content-Security-Policy", fmt.Sprintf("default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://%s; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; worker-src 'none'; webrtc 'block'; child-src 'none'; frame-src 'none'; frame-ancestors 'none'; object-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'; sandbox allow-scripts allow-same-origin", authority))
 }
 
 var websocketUpgrader = websocket.Upgrader{
@@ -360,10 +421,74 @@ func (s *OverlayServer) serveWebSocket(owner *http.Server, authority, capability
 	go s.keepAlive(client)
 
 	for {
-		if _, _, err := connection.ReadMessage(); err != nil {
+		messageType, payload, err := connection.ReadMessage()
+		if err != nil {
+			return
+		}
+		if messageType != websocket.TextMessage || !s.handleClientMessage(client, payload) {
 			return
 		}
 	}
+}
+
+func (s *OverlayServer) handleClientMessage(client *overlayClient, payload []byte) bool {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return false
+	}
+	typeValue, ok := raw["type"]
+	if !ok {
+		return false
+	}
+	var messageType string
+	if err := json.Unmarshal(typeValue, &messageType); err != nil {
+		return false
+	}
+
+	var message clientMessage
+	if err := json.Unmarshal(payload, &message); err != nil {
+		return false
+	}
+	switch messageType {
+	case "ready":
+		if !onlyFields(raw, "type", "sdkVersion") || message.SDKVersion != overlaySDKVersion {
+			return false
+		}
+		s.mu.Lock()
+		if _, exists := s.clients[client]; exists {
+			client.ready = true
+		}
+		s.mu.Unlock()
+		return true
+	case "complete":
+		if !onlyFields(raw, "type", "eventId") || message.EventID == "" || len(message.EventID) > 128 {
+			return false
+		}
+		s.mu.Lock()
+		if !time.Now().Before(client.activeUntil) {
+			client.activeID = ""
+			client.activeUntil = time.Time{}
+		} else if subtle.ConstantTimeCompare([]byte(client.activeID), []byte(message.EventID)) == 1 {
+			client.activeID = ""
+			client.activeUntil = time.Time{}
+		}
+		s.mu.Unlock()
+		return true
+	default:
+		return false
+	}
+}
+
+func onlyFields(raw map[string]json.RawMessage, allowed ...string) bool {
+	if len(raw) != len(allowed) {
+		return false
+	}
+	for _, field := range allowed {
+		if _, ok := raw[field]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *OverlayServer) keepAlive(client *overlayClient) {
@@ -390,6 +515,14 @@ func newCapability() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(random), nil
 }
 
+func newEventID() (string, error) {
+	random := make([]byte, eventIDBytes)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(random), nil
+}
+
 func validAuthority(r *http.Request, authority string) bool {
 	return r.Host == authority
 }
@@ -398,8 +531,26 @@ func validCapabilityPath(path, prefix, capability string) bool {
 	if !strings.HasPrefix(path, prefix) {
 		return false
 	}
-	provided := strings.TrimPrefix(path, prefix)
+	provided := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/")
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(capability)) == 1
+}
+
+func overlayAsset(path, capability string) (string, bool) {
+	if !strings.HasPrefix(path, overlayPathPrefix) {
+		return "", false
+	}
+	remainder := strings.TrimPrefix(path, overlayPathPrefix)
+	provided, asset, found := strings.Cut(remainder, "/")
+	if subtle.ConstantTimeCompare([]byte(provided), []byte(capability)) != 1 {
+		return "", false
+	}
+	if !found || asset == "" {
+		return "index.html", true
+	}
+	if asset == "sdk.js" {
+		return asset, true
+	}
+	return "", false
 }
 
 func validOrigin(origin, authority string) bool {
