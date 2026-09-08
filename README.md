@@ -2,7 +2,7 @@
 
 YouTube Live / Twitch のイベントを受け取り、OBS Browser Source で演出を実行するデスクトップアプリです。
 
-現在は Phase 0 の技術検証段階です。PR-007 ではTwitch Device Code GrantとEventSub WebSocketによるコメント受信を確認するPoCを追加しています。
+Phase 0の技術検証を完了し、現行構成のままPhase 1へ進む判断を行いました。採用技術、OBS／CEF対応基準、CSP例外、外部APIライブラリ、未解決のリリースゲートは[Phase 0 ADR](docs/adr/0001-phase-0-technology-decisions.md)に記録しています。
 
 ## 採用バージョン
 
