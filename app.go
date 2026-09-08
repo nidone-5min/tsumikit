@@ -19,6 +19,7 @@ type App struct {
 	ctx           context.Context
 	overlayServer *OverlayServer
 	youtube       *YouTubeService
+	twitch        *TwitchService
 	lifecycle     desktopLifecycle
 	tray          trayReadiness
 	stopSignals   context.CancelFunc
@@ -33,6 +34,11 @@ func NewApp() *App {
 		lifecycle:     wailsDesktopLifecycle{},
 	}
 	app.youtube = newYouTubeService(youtubeServiceDependencies{
+		openURL: func(ctx context.Context, url string) {
+			wailsruntime.BrowserOpenURL(ctx, url)
+		},
+	})
+	app.twitch = newTwitchService(twitchServiceDependencies{
 		openURL: func(ctx context.Context, url string) {
 			wailsruntime.BrowserOpenURL(ctx, url)
 		},
@@ -68,6 +74,7 @@ func (a *App) shutdown(ctx context.Context) {
 		stopSignals()
 	}
 	a.youtube.Shutdown()
+	a.twitch.Shutdown()
 
 	if err := a.overlayServer.Stop(ctx); err != nil {
 		a.overlayServer.setLastError(err)
@@ -138,4 +145,41 @@ func (a *App) DisconnectYouTube() {
 // SignOutYouTube clears the session-only OAuth token and stops reception.
 func (a *App) SignOutYouTube() {
 	a.youtube.SignOut()
+}
+
+// GetTwitchStatus reports the in-memory Device Code and EventSub state.
+func (a *App) GetTwitchStatus() TwitchStatus {
+	return a.twitch.Status()
+}
+
+// BeginTwitchAuth starts Twitch Device Code Grant in the system browser.
+func (a *App) BeginTwitchAuth(clientID string) error {
+	a.lifecycleMu.Lock()
+	ctx := a.ctx
+	a.lifecycleMu.Unlock()
+	if ctx == nil {
+		return fmt.Errorf("アプリの起動完了後にTwitch認証を開始してください")
+	}
+	return a.twitch.BeginAuth(ctx, clientID)
+}
+
+// ConnectTwitch resolves a channel URL and starts EventSub reception.
+func (a *App) ConnectTwitch(streamURL string) error {
+	a.lifecycleMu.Lock()
+	ctx := a.ctx
+	a.lifecycleMu.Unlock()
+	if ctx == nil {
+		return fmt.Errorf("アプリの起動完了後にTwitchへ接続してください")
+	}
+	return a.twitch.Connect(ctx, streamURL)
+}
+
+// DisconnectTwitch stops EventSub while preserving the session token.
+func (a *App) DisconnectTwitch() {
+	a.twitch.Disconnect()
+}
+
+// SignOutTwitch clears the session-only OAuth token and stops EventSub.
+func (a *App) SignOutTwitch() {
+	a.twitch.SignOut()
 }

@@ -1,11 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  BeginTwitchAuth,
   BeginYouTubeAuth,
+  ConnectTwitch,
   ConnectYouTube,
+  DisconnectTwitch,
   DisconnectYouTube,
   GetOverlayStatus,
+  GetTwitchStatus,
   GetYouTubeStatus,
   SendTestEvent,
+  SignOutTwitch,
   SignOutYouTube,
   StartOverlayServer,
   StopOverlayServer,
@@ -34,6 +39,14 @@ function App() {
   const [lastYouTubeEvent, setLastYouTubeEvent] = useState<main.YouTubeEvent>();
   const youtubeRequest = useRef(0);
   const youtubeOperation = useRef(false);
+  const [twitchStatus, setTwitchStatus] = useState<main.TwitchStatus>();
+  const [twitchClientID, setTwitchClientID] = useState('');
+  const [twitchStreamURL, setTwitchStreamURL] = useState('');
+  const [twitchNotice, setTwitchNotice] = useState('');
+  const [twitchBusy, setTwitchBusy] = useState(false);
+  const [lastTwitchEvent, setLastTwitchEvent] = useState<main.TwitchEvent>();
+  const twitchRequest = useRef(0);
+  const twitchOperation = useRef(false);
 
   const refreshStatus = async () => {
     try {
@@ -47,6 +60,29 @@ function App() {
     void refreshStatus();
     const timer = window.setInterval(() => void refreshStatus(), 1000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  const refreshTwitchStatus = async (force = false) => {
+    if (twitchOperation.current && !force) return;
+    const request = ++twitchRequest.current;
+    try {
+      const next = await GetTwitchStatus();
+      if (request !== twitchRequest.current) return;
+      setTwitchStatus(next);
+      setLastTwitchEvent(next.lastEvent);
+    } catch (error) {
+      if (request !== twitchRequest.current) return;
+      setTwitchNotice(errorMessage(error));
+    }
+  };
+
+  useEffect(() => {
+    void refreshTwitchStatus();
+    const timer = window.setInterval(() => void refreshTwitchStatus(), 1000);
+    return () => {
+      twitchRequest.current++;
+      window.clearInterval(timer);
+    };
   }, []);
 
   const refreshYouTubeStatus = async (force = false) => {
@@ -191,6 +227,67 @@ function App() {
     } finally {
       youtubeOperation.current = false;
       setYouTubeBusy(false);
+    }
+  };
+
+  const beginTwitchAuth = async () => {
+    twitchOperation.current = true;
+    twitchRequest.current++;
+    setLastTwitchEvent(undefined);
+    setTwitchBusy(true);
+    setTwitchNotice('');
+    try {
+      await BeginTwitchAuth(twitchClientID);
+      setTwitchNotice(
+        '既定のブラウザでTwitch認証を完了してください。画面のコードも確認できます。',
+      );
+      await refreshTwitchStatus(true);
+    } catch (error) {
+      setTwitchNotice(errorMessage(error));
+    } finally {
+      twitchOperation.current = false;
+      setTwitchBusy(false);
+    }
+  };
+
+  const connectTwitch = async () => {
+    twitchOperation.current = true;
+    twitchRequest.current++;
+    setTwitchBusy(true);
+    setTwitchNotice('');
+    setLastTwitchEvent(undefined);
+    try {
+      await ConnectTwitch(twitchStreamURL);
+      setTwitchNotice('Twitch EventSubへの接続を開始しました。');
+      await refreshTwitchStatus(true);
+    } catch (error) {
+      setTwitchNotice(errorMessage(error));
+      await refreshTwitchStatus(true);
+    } finally {
+      twitchOperation.current = false;
+      setTwitchBusy(false);
+    }
+  };
+
+  const endTwitchSession = async (signOut: boolean) => {
+    twitchOperation.current = true;
+    twitchRequest.current++;
+    setTwitchBusy(true);
+    setLastTwitchEvent(undefined);
+    try {
+      if (signOut) await SignOutTwitch();
+      else await DisconnectTwitch();
+      setTwitchNotice(
+        signOut
+          ? 'セッション内のTwitch認証情報を消去しました。'
+          : 'Twitch EventSubから切断しました。',
+      );
+      await refreshTwitchStatus(true);
+    } catch (error) {
+      setTwitchNotice(errorMessage(error));
+    } finally {
+      twitchOperation.current = false;
+      setTwitchBusy(false);
     }
   };
 
@@ -436,6 +533,156 @@ function App() {
               aria-live="polite"
             >
               {youtubeStatus?.error || youtubeNotice}
+            </p>
+          )}
+        </div>
+
+        <div className="mt-10 border-t border-[#303642] pt-8">
+          <p className="mb-2 text-[13px] font-bold tracking-[0.12em] text-[#9ba4b5]">
+            TWITCH API POC
+          </p>
+          <h2 className="text-2xl font-bold">Twitchコメント受信</h2>
+          <p className="mt-2 text-sm leading-6 text-[#9ba4b5]">
+            公開クライアント向けDevice Code Grantで認証し、EventSub
+            WebSocketからコメントを受信します。認証情報はアプリ終了時に破棄されます。
+          </p>
+
+          <div className="mt-5 flex items-center gap-3 rounded-xl border border-[#303642] bg-[#12151a] p-4">
+            <span
+              className={`h-3 w-3 rounded-full ${twitchStatus?.connected ? 'bg-[#9147ff] shadow-[0_0_16px_rgba(145,71,255,0.62)]' : twitchStatus?.authenticated ? 'bg-[#58d68d]' : 'bg-[#727987]'}`}
+              aria-hidden="true"
+            />
+            <div>
+              <p className="font-bold">
+                {twitchStatus?.connected
+                  ? 'コメント受信中'
+                  : twitchStatus?.state === 'reconnecting'
+                    ? '再接続中'
+                    : twitchStatus?.state === 'connecting'
+                      ? 'EventSub接続中'
+                      : twitchStatus?.state === 'authorizing'
+                        ? 'Twitch認証待ち'
+                        : twitchStatus?.authenticated
+                          ? 'Twitch認証済み'
+                          : '未認証'}
+              </p>
+              <p className="text-sm text-[#9ba4b5]">
+                コメント {twitchStatus?.messages ?? 0}件 / 再接続{' '}
+                {twitchStatus?.reconnects ?? 0}回
+              </p>
+            </div>
+          </div>
+
+          <label className="mt-5 grid gap-2 text-sm font-bold text-[#cdd3dd]">
+            Twitch公開クライアントのClient ID
+            <input
+              className="rounded-lg border border-[#3b4250] bg-[#101217] px-4 py-3 text-base text-white disabled:opacity-60"
+              value={twitchClientID}
+              disabled={twitchBusy || twitchStatus?.connected}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="Twitch Developer ConsoleのClient ID"
+              onChange={(event) => setTwitchClientID(event.target.value)}
+            />
+          </label>
+          <div className="mt-3 flex gap-3">
+            <button
+              className="rounded-lg bg-[#9147ff] px-5 py-3 font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
+              type="button"
+              disabled={
+                twitchBusy || twitchStatus?.connected || !twitchClientID
+              }
+              onClick={() => void beginTwitchAuth()}
+            >
+              Twitch認証
+            </button>
+            <button
+              className="rounded-lg border border-[#505866] px-5 py-3 font-bold disabled:cursor-not-allowed disabled:opacity-50"
+              type="button"
+              disabled={
+                twitchBusy ||
+                (!twitchStatus?.authenticated &&
+                  twitchStatus?.state !== 'authorizing')
+              }
+              onClick={() => void endTwitchSession(true)}
+            >
+              認証を解除
+            </button>
+          </div>
+
+          {twitchStatus?.state === 'authorizing' && twitchStatus.userCode && (
+            <div className="mt-5 rounded-xl border border-[#5f4290] bg-[#171122] p-4">
+              <p className="text-sm text-[#b9a3db]">認証画面に入力するコード</p>
+              <p className="mt-1 font-mono text-2xl font-bold tracking-[0.16em] text-white">
+                {twitchStatus.userCode}
+              </p>
+              <p className="mt-2 text-xs break-all text-[#9ba4b5]">
+                {twitchStatus.verificationUri}
+              </p>
+            </div>
+          )}
+
+          <label className="mt-6 grid gap-2 text-sm font-bold text-[#cdd3dd]">
+            Twitch配信URL
+            <input
+              className="rounded-lg border border-[#3b4250] bg-[#101217] px-4 py-3 text-base text-white disabled:opacity-60"
+              type="url"
+              value={twitchStreamURL}
+              disabled={twitchBusy || twitchStatus?.connected}
+              placeholder="https://www.twitch.tv/channel_name"
+              onChange={(event) => setTwitchStreamURL(event.target.value)}
+            />
+          </label>
+          <div className="mt-3 flex gap-3">
+            <button
+              className="rounded-lg bg-[#9147ff] px-5 py-3 font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"
+              type="button"
+              disabled={
+                twitchBusy ||
+                twitchStatus?.connected ||
+                twitchStatus?.state === 'connecting' ||
+                twitchStatus?.state === 'reconnecting' ||
+                !twitchStatus?.authenticated ||
+                !twitchStreamURL
+              }
+              onClick={() => void connectTwitch()}
+            >
+              受信開始
+            </button>
+            <button
+              className="rounded-lg border border-[#505866] px-5 py-3 font-bold disabled:cursor-not-allowed disabled:opacity-50"
+              type="button"
+              disabled={
+                twitchBusy ||
+                (twitchStatus?.state !== 'connected' &&
+                  twitchStatus?.state !== 'connecting' &&
+                  twitchStatus?.state !== 'reconnecting')
+              }
+              onClick={() => void endTwitchSession(false)}
+            >
+              切断
+            </button>
+          </div>
+
+          {lastTwitchEvent && (
+            <div className="mt-6 rounded-xl border border-[#303642] bg-[#12151a] p-4">
+              <p className="min-w-0 truncate font-bold">
+                {lastTwitchEvent.author ||
+                  lastTwitchEvent.authorLogin ||
+                  'Twitchユーザー'}
+              </p>
+              <p className="mt-2 break-words text-[#dce2ea]">
+                {lastTwitchEvent.message}
+              </p>
+            </div>
+          )}
+
+          {(twitchNotice || twitchStatus?.error) && (
+            <p
+              className="mt-6 rounded-lg bg-[#242a34] p-3 text-sm text-[#dce2ea]"
+              aria-live="polite"
+            >
+              {twitchStatus?.error || twitchNotice}
             </p>
           )}
         </div>

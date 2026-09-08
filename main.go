@@ -19,9 +19,7 @@ func main() {
 
 	// Create an instance of the app structure
 	app := NewApp()
-	tray := NewTrayController(app.showWindow, app.requestQuit)
-	app.setTray(tray)
-	stopTray := tray.Prepare()
+	stopTray := prepareApplicationTray(app)
 	defer stopTray()
 
 	// Create application with options
