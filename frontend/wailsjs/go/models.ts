@@ -20,6 +20,74 @@ export namespace main {
 	        this.error = source["error"];
 	    }
 	}
+	export class TwitchEvent {
+	    author: string;
+	    authorLogin: string;
+	    message: string;
+	    occurredAt: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TwitchEvent(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.author = source["author"];
+	        this.authorLogin = source["authorLogin"];
+	        this.message = source["message"];
+	        this.occurredAt = source["occurredAt"];
+	    }
+	}
+	export class TwitchStatus {
+	    state: string;
+	    authenticated: boolean;
+	    connected: boolean;
+	    channelLogin: string;
+	    userCode: string;
+	    verificationUri: string;
+	    codeExpiresAt: string;
+	    messages: number;
+	    reconnects: number;
+	    lastEvent?: TwitchEvent;
+	    error: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TwitchStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.state = source["state"];
+	        this.authenticated = source["authenticated"];
+	        this.connected = source["connected"];
+	        this.channelLogin = source["channelLogin"];
+	        this.userCode = source["userCode"];
+	        this.verificationUri = source["verificationUri"];
+	        this.codeExpiresAt = source["codeExpiresAt"];
+	        this.messages = source["messages"];
+	        this.reconnects = source["reconnects"];
+	        this.lastEvent = this.convertValues(source["lastEvent"], TwitchEvent);
+	        this.error = source["error"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class YouTubeEvent {
 	    author: string;
 	    message: string;
