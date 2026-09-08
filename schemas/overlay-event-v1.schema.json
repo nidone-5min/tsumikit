@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tsumikit.local/schemas/overlay-event-v1.schema.json",
+  "title": "tsumikit OverlayEvent v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "platform",
+    "type",
+    "occurredAt",
+    "receivedAt",
+    "replayed",
+    "test",
+    "stream",
+    "payload"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1" },
+    "id": { "$ref": "#/$defs/identifier" },
+    "platform": { "enum": ["youtube", "twitch", "test"] },
+    "type": {
+      "enum": [
+        "comment",
+        "paid_message",
+        "paid_sticker",
+        "bits",
+        "membership",
+        "membership_gift",
+        "raid",
+        "follow",
+        "channel_points",
+        "comment_deleted",
+        "user_comments_cleared",
+        "chat_cleared",
+        "stream_started",
+        "stream_ended"
+      ]
+    },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "receivedAt": { "type": "string", "format": "date-time" },
+    "replayed": { "type": "boolean" },
+    "test": { "type": "boolean" },
+    "stream": { "$ref": "#/$defs/stream" },
+    "author": { "$ref": "#/$defs/author" },
+    "message": { "$ref": "#/$defs/message" },
+    "payload": true,
+    "platformExtra": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,63}$" }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u0020\\u007F-\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF](?:[^\\u0000-\\u001F\\u007F-\\u009F\\u2028\\u2029]*[^\\u0000-\\u0020\\u007F-\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])?$"
+    },
+    "localMediaUrl": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^/(?!/)[^\\\\\\u0000-\\u001F\\u007F?#]+$"
+    },
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "channelId": { "$ref": "#/$defs/identifier" },
+        "channelName": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "badge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "name": { "$ref": "#/$defs/identifier" },
+        "imageUrl": { "$ref": "#/$defs/localMediaUrl" }
+      }
+    },
+    "author": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "displayName",
+        "badges",
+        "isBroadcaster",
+        "isModerator",
+        "isMemberOrSubscriber"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "displayName": { "$ref": "#/$defs/identifier" },
+        "login": { "$ref": "#/$defs/identifier" },
+        "imageUrl": { "$ref": "#/$defs/localMediaUrl" },
+        "badges": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/badge" }
+        },
+        "isBroadcaster": { "type": "boolean" },
+        "isModerator": { "type": "boolean" },
+        "isMemberOrSubscriber": { "type": "boolean" },
+        "color": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u0020\\u007F-\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF](?:[^\\u0000-\\u001F\\u007F-\\u009F\\u2028\\u2029]*[^\\u0000-\\u0020\\u007F-\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF])?$"
+        }
+      }
+    },
+    "emote": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "displayName", "imageUrl"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "displayName": { "$ref": "#/$defs/identifier" },
+        "imageUrl": { "$ref": "#/$defs/localMediaUrl" }
+      }
+    },
+    "fragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "text"],
+      "properties": {
+        "type": { "enum": ["text", "emoji", "emote"] },
+        "text": { "type": "string", "maxLength": 10000 },
+        "emote": { "$ref": "#/$defs/emote" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "emote" } } },
+          "then": { "required": ["emote"] },
+          "else": { "not": { "required": ["emote"] } }
+        }
+      ]
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "fragments", "publishedAt", "deleted"],
+      "properties": {
+        "text": { "type": "string", "maxLength": 10000 },
+        "fragments": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": { "$ref": "#/$defs/fragment" }
+        },
+        "publishedAt": { "type": "string", "format": "date-time" },
+        "deleted": { "type": "boolean" }
+      }
+    }
+  }
+}
