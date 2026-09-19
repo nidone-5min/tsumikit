@@ -63,18 +63,13 @@ func openAt(ctx context.Context, dir string) (*Store, error) {
 			return nil, ErrStorage
 		}
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err == nil {
-		err = f.Close()
-	} else if errors.Is(err, os.ErrExist) {
-		err = nil
-	}
-	if err != nil {
+	if err := createPrivateFile(path); err != nil {
 		return nil, ErrStorage
 	}
-	if err = secureFile(path); err != nil {
+	if err := secureFile(path); err != nil {
 		return nil, ErrStorage
 	}
+
 	u := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
 	if filepath.VolumeName(path) != "" {
 		u.Path = "/" + u.Path

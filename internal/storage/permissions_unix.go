@@ -39,3 +39,14 @@ func securePath(path string, directory bool) error {
 	}
 	return os.Chmod(path, mode)
 }
+
+func createPrivateFile(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if os.IsExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}

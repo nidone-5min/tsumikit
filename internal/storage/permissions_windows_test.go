@@ -64,3 +64,38 @@ func TestTightenExistingWindowsDACL(t *testing.T) {
 	checkPrivateDACL(t, dir)
 	checkPrivateDACL(t, filepath.Join(dir, "settings.db"))
 }
+
+// Exercise creation separately so an ownership regression is distinguishable
+// from a SQLite open failure, including under elevated Windows CI tokens.
+func TestWindowsCreationUsesCurrentUserOwner(t *testing.T) {
+	sd, user, err := userDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil || owner == nil || !owner.Equals(user) {
+		t.Fatal("security descriptor must explicitly name the current user as owner")
+	}
+	dir := filepath.Join(t.TempDir(), "owned")
+	if err := secureDirectory(dir); err != nil {
+		t.Fatalf("create private directory: %v", err)
+	}
+	path := filepath.Join(dir, "settings.db")
+	if err := createPrivateFile(path); err != nil {
+		t.Fatalf("create private file: %v", err)
+	}
+	for _, p := range []string{dir, path} {
+		actual, err := windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner, _, err := actual.Owner()
+		if err != nil || owner == nil || !owner.Equals(user) {
+			t.Fatal("created object must be owned by the current user")
+		}
+		checkPrivateDACL(t, p)
+	}
+	if err := secureFile(path); err != nil {
+		t.Fatalf("verify created file: %v", err)
+	}
+}

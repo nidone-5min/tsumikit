@@ -10,7 +10,7 @@ Phase 1の共通イベント契約はschema version `1`です。[JSON Schema](sc
 
 設計書v0.2第16節に対応する`internal/storage`を追加しています。後続PR向けの独立したrepositoryで、現行PoCの起動・UI・認証にはまだ接続していません。現在のPoCが設定や配信URLを保存する動作は変わりません。
 
-`storage.Open(ctx)`はOSユーザーごとの`os.UserConfigDir()`配下に`tsumikit/settings.db`を作成します。標準環境ではWindowsの`%AppData%\tsumikit`、macOSの`~/Library/Application Support/tsumikit`です。作業ディレクトリや開発用環境変数には依存しません。Windowsは現在ユーザーのSIDだけを許可する継承可能な保護DACL、macOSはACL除去とディレクトリ`0700`／DB`0600`を使います。既存ファイルの所有者・種類を確認し、symlink、Windows reparse point、DBのhardlinkを拒否します。権限設定に失敗した場合はDBを開きません。
+`storage.Open(ctx)`はOSユーザーごとの`os.UserConfigDir()`配下に`tsumikit/settings.db`を作成します。標準環境ではWindowsの`%AppData%\tsumikit`、macOSの`~/Library/Application Support/tsumikit`です。作業ディレクトリや開発用環境変数には依存しません。Windowsはディレクトリ／DB作成時に所有者を現在ユーザーのSIDへ明示し、同SIDだけを許可する継承可能な保護DACL、macOSはACL除去とディレクトリ`0700`／DB`0600`を使います。既存ファイルの所有者・種類を確認し、symlink、Windows reparse point、DBのhardlinkを拒否します。権限設定に失敗した場合はDBを開きません。
 
 - schema versionはSQLiteの`user_version`で管理し、未適用migrationとversion更新を1トランザクションで適用します。失敗時は全体をロールバックし、新しいversionのDBを古いアプリで開くことは拒否します。
 - アプリ設定、platform＋アカウントID別の前回配信URL、パッケージmetadata／独自設定、演出設定／発火条件を保存します。パッケージ更新はmetadataと全演出設定をまとめて置換し、削除時は関連演出も削除します。
