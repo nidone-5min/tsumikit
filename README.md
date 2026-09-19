@@ -6,6 +6,23 @@ Phase 0の技術検証を完了し、現行構成のままPhase 1へ進む判断
 
 Phase 1の共通イベント契約はschema version `1`です。[JSON Schema](schemas/overlay-event-v1.schema.json)と[TypeScript型](frontend/src/types/overlay-event.ts)を公開契約とし、Goのplatform adapterが共通Envelopeへ正規化して、`platformExtra`を明示的な許可リストに限定します。schema versionを変更せずに既存フィールドの意味を変更しません。
 
+## 設定DB基盤（PR-010）
+
+設計書v0.2第16節に対応する`internal/storage`を追加しています。後続PR向けの独立したrepositoryで、現行PoCの起動・UI・認証にはまだ接続していません。現在のPoCが設定や配信URLを保存する動作は変わりません。
+
+`storage.Open(ctx)`はOSユーザーごとの`os.UserConfigDir()`配下に`tsumikit/settings.db`を作成します。標準環境ではWindowsの`%AppData%\tsumikit`、macOSの`~/Library/Application Support/tsumikit`です。作業ディレクトリや開発用環境変数には依存しません。Windowsは現在ユーザーのSIDだけを許可する継承可能な保護DACL、macOSはACL除去とディレクトリ`0700`／DB`0600`を使います。既存ファイルの所有者・種類を確認し、symlink、Windows reparse point、DBのhardlinkを拒否します。権限設定に失敗した場合はDBを開きません。
+
+- schema versionはSQLiteの`user_version`で管理し、未適用migrationとversion更新を1トランザクションで適用します。失敗時は全体をロールバックし、新しいversionのDBを古いアプリで開くことは拒否します。
+- アプリ設定、platform＋アカウントID別の前回配信URL、パッケージmetadata／独自設定、演出設定／発火条件を保存します。パッケージ更新はmetadataと全演出設定をまとめて置換し、削除時は関連演出も削除します。
+- URLは既知の公開YouTube／Twitch URLだけを正規化し、認証情報・任意query・fragmentを含むものは拒否します。OAuth token、Capability、コメント、投稿者情報、イベント履歴、待機キュー、画像キャッシュの保存APIは設けません。
+- パッケージ独自設定・発火条件はサイズ制限付きJSON objectとして保存します。manifestの型／範囲や発火条件の意味検証は後続の各機能で行う必要があります。repositoryの上限は1パッケージ100演出、JSON合計1MiB、各object 64KiBです。
+- `AppSettings`の読み込み失敗時は安全な既定値（port `18500`）とエラーを返します。呼び出し元はエラーを表示し、既定値を自動保存して既存データを上書きしてはいけません。破損DBの自動削除・再作成はしません。
+- SQLite接続は1 Storeにつき1本、外部ロック待ちは最大2秒、書き込みは`FULL`同期です。利用終了時は処理を停止したうえで`Close()`を呼びます。展開ファイルとDBをまとめた切り替えは後続のZIP登録PRで扱います。
+
+SQLiteには[modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite)v1.59.0（BSD-3-Clause、同梱SQLiteはpublic domain）を追加しています。純Goドライバーのため、DB用のCコンパイラーやSQLite DLLを配布先へ追加する必要がありません。推移依存のlicenseも各moduleのLICENSEを配布時の通知対象として扱います。
+
+CIはビルド・テスト・脆弱性検査のGoを同じ`1.27.x`系列へ揃えています。Windows／macOSで`go test ./...`と`go test -race ./...`を実行し、PR・push・週次に`govulncheck`と`npm audit --audit-level=high`を実行します。追加したstorageテストには、migrationの失敗／再実行／未知version、更新ロールバック、同時操作、キャンセル、ユーザー／アカウント分離、DB破損保護、OS別権限を含めています。
+
 ## 採用バージョン
 
 - Wails CLI / Go module: `v2.15.0`
