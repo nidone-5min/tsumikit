@@ -4,6 +4,8 @@ YouTube Live / Twitch のイベントを受け取り、OBS Browser Source で演
 
 Phase 0の技術検証を完了し、現行構成のままPhase 1へ進む判断を行いました。採用技術、OBS／CEF対応基準、CSP例外、外部APIライブラリ、未解決のリリースゲートは[Phase 0 ADR](docs/adr/0001-phase-0-technology-decisions.md)に記録しています。
 
+Phase 1の共通イベント契約はschema version `1`です。[JSON Schema](schemas/overlay-event-v1.schema.json)と[TypeScript型](frontend/src/types/overlay-event.ts)を公開契約とし、Goのplatform adapterが共通Envelopeへ正規化して、`platformExtra`を明示的な許可リストに限定します。schema versionを変更せずに既存フィールドの意味を変更しません。
+
 ## 採用バージョン
 
 - Wails CLI / Go module: `v2.15.0`
